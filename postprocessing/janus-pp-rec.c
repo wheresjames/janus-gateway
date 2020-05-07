@@ -611,6 +611,7 @@ int main(int argc, char *argv[])
 	uint64_t max32 = UINT32_MAX;
 	/* Create extension file if needed */
 	int save2ext = 0;
+    int lastrotation = 0;
 	char extbuf[128] = {0};
 	char prevextbuf[128] = {0};
 	if(extfile) {
@@ -740,13 +741,15 @@ int main(int argc, char *argv[])
 		/* This frame is a sure thing now */
 		if(extfileptr) {
 			/* Dump extensions to string and save */
-			janus_pp_rtp_header_extension_stringify(prebuffer, len > 24 ? 24 : len, extbuf, sizeof(extbuf)-1);
-			extbuf[sizeof(extbuf)-1] = 0;
-			size_t blen = strlen(extbuf);
-			/* Save only if changed */
-			if (memcmp(extbuf, prevextbuf, blen)) {
+			// janus_pp_rtp_header_extension_stringify(prebuffer, len > 24 ? 24 : len, extbuf, sizeof(extbuf)-1);
+			// extbuf[sizeof(extbuf)-1] = 0;
+			// size_t blen = strlen(extbuf);
+			// /* Save only if changed */
+			// if (memcmp(extbuf, prevextbuf, blen)) {
+            if (lastrotation != rotation) {
+                lastrotation = rotation;
 				save2ext = 1;
-				memcpy(prevextbuf, extbuf, blen);
+				//memcpy(prevextbuf, extbuf, blen);
 				fwrite(",{", 1, 2, extfileptr);
 				fprintf(extfileptr, "\"pktts\":%u", pkt_ts);
 				fprintf(extfileptr, ",\"type\":%u", rtp->type);
@@ -755,9 +758,9 @@ int main(int argc, char *argv[])
 				if(0 <= rotation) {
 					fprintf(extfileptr, ",\"rotation\":%u", rotation);
 				}
-				if(0 < blen && sizeof(extbuf) > blen) {
-					fprintf(extfileptr, ",\"extensions\":{\"_len\":%zu%s}", blen, extbuf);
-				}
+				// if(0 < blen && sizeof(extbuf) > blen) {
+				// 	fprintf(extfileptr, ",\"extensions\":{\"_len\":%zu%s}", blen, extbuf);
+				// }
 			}
 			else {
 				save2ext = 0;
