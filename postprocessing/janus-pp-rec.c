@@ -71,6 +71,8 @@ Usage: janus-pp-rec [OPTIONS] source.mjr [destination.[opus|wav|webm|mp4|srt]]
                                   format from the destination)  (possible
                                   values="opus", "wav", "webm", "mp4",
                                   "srt")
+  -e, --extfile                 Dump RTP extensions with pts timestamps 
+                                  into a JSON file.
 \endverbatim
  *
  * \note This utility does not do any form of transcoding. It just
@@ -122,6 +124,9 @@ static janus_pp_frame_packet *list = NULL, *last = NULL;
 static char *metadata = NULL;
 static int working = 0;
 
+static char *extfile = NULL;
+static FILE *extfileptr = NULL;
+
 #define DEFAULT_POST_RESET_TRIGGER	200
 static int post_reset_trigger = DEFAULT_POST_RESET_TRIGGER;
 static int ignore_first_packets = 0;
@@ -142,6 +147,7 @@ static int janus_pp_rtp_header_extension_parse_audio_level(char *buf, int len, i
 /* Helper method to return the video rotation from the related RTP extension, if any */
 static int video_orient_extmap_id = -1;
 static int janus_pp_rtp_header_extension_parse_video_orientation(char *buf, int len, int id, int *rotation);
+static int janus_pp_rtp_header_extension_stringify(char *buf, int len, char *out, int olen);
 
 typedef struct janus_pp_rtp_skew_context {
 	guint32 ssrc, rate;
@@ -219,6 +225,9 @@ int main(int argc, char *argv[])
 		if(val >= 0)
 			audioskew_th = val;
 	}
+	if(args_info.extfile_given || (g_getenv("JANUS_PPREC_EXTFILE") != NULL)) {
+		extfile = g_strdup(args_info.extfile_given ? args_info.extfile_arg : g_getenv("JANUS_PPREC_EXTFILE"));
+	}
 
 	/* Evaluate arguments to find source and target */
 	char *source = NULL, *destination = NULL, *setting = NULL;
@@ -240,7 +249,8 @@ int main(int argc, char *argv[])
 				(strcmp(setting, "-v")) && (strcmp(setting, "--videoorient-ext")) &&
 				(strcmp(setting, "-d")) && (strcmp(setting, "--debug-level")) &&
 				(strcmp(setting, "-f")) && (strcmp(setting, "--format")) &&
-				(strcmp(setting, "-S")) && (strcmp(setting, "--audioskew"))
+				(strcmp(setting, "-S")) && (strcmp(setting, "--audioskew")) &&
+				(strcmp(setting, "-e")) && (strcmp(setting, "--extfile"))
 		)) {
 			if(source == NULL)
 				source = argv[i];
@@ -281,6 +291,8 @@ int main(int argc, char *argv[])
 			JANUS_LOG(LOG_INFO, "  -- Parsing header only\n");
 		if(destination != NULL)
 			JANUS_LOG(LOG_INFO, "Target file: %s\n", destination);
+		if(extfile != NULL)
+			JANUS_LOG(LOG_INFO, "Extension file : %s\n", extfile);
 		JANUS_LOG(LOG_INFO, "\n");
 	}
 
@@ -597,6 +609,21 @@ int main(int argc, char *argv[])
 	times_resetted = 0;
 	post_reset_pkts = 0;
 	uint64_t max32 = UINT32_MAX;
+	/* Create extension file if needed */
+	int save2ext = 0;
+    int lastrotation = 0;
+	char extbuf[128] = {0};
+	char prevextbuf[128] = {0};
+	if(extfile) {
+		extfileptr = fopen(extfile, "wb");
+		if(extfileptr == NULL) {
+			JANUS_LOG(LOG_ERR, "Could not create file %s\n", extfile);
+		}
+		else {
+			const char *header = "[\n{\"description\":\"RTP Extensions\", \"filetype\":\"extfile\"}\n";
+			fwrite(header, 1, strlen(header), extfileptr);
+		}
+	}
 	/* Start loop */
 	while(working && offset < fsize) {
 		/* Read frame header */
@@ -710,6 +737,34 @@ int main(int argc, char *argv[])
 			offset += len;
 			count++;
 			continue;
+		}
+		/* This frame is a sure thing now */
+		if(extfileptr) {
+			/* Dump extensions to string and save */
+			// janus_pp_rtp_header_extension_stringify(prebuffer, len > 24 ? 24 : len, extbuf, sizeof(extbuf)-1);
+			// extbuf[sizeof(extbuf)-1] = 0;
+			// size_t blen = strlen(extbuf);
+			// /* Save only if changed */
+			// if (memcmp(extbuf, prevextbuf, blen)) {
+            if (lastrotation != rotation) {
+                lastrotation = rotation;
+				save2ext = 1;
+				//memcpy(prevextbuf, extbuf, blen);
+				fwrite(",{", 1, 2, extfileptr);
+				fprintf(extfileptr, "\"pktts\":%u", pkt_ts);
+				fprintf(extfileptr, ",\"type\":%u", rtp->type);
+				fprintf(extfileptr, ",\"ts\":%u", ntohl(rtp->timestamp));
+				/* Save rotation if present */
+				if(0 <= rotation) {
+					fprintf(extfileptr, ",\"rotation\":%u", rotation);
+				}
+				// if(0 < blen && sizeof(extbuf) > blen) {
+				// 	fprintf(extfileptr, ",\"extensions\":{\"_len\":%zu%s}", blen, extbuf);
+				// }
+			}
+			else {
+				save2ext = 0;
+			}
 		}
 		/* Generate frame packet and insert in the ordered list */
 		janus_pp_frame_packet *p = g_malloc0(sizeof(janus_pp_frame_packet));
@@ -861,6 +916,16 @@ int main(int argc, char *argv[])
 		/* Skip data for now */
 		offset += len;
 		count++;
+		/* End this line of the extension file */
+		if(extfileptr && save2ext) {
+			fwrite("}\n", 1, 2, extfileptr);
+		}
+	}
+	/* Close map file if open */
+	if(extfileptr) {
+		fwrite("]\n", 1, 2, extfileptr);
+		fclose(extfileptr);
+		extfileptr = NULL;
 	}
 	if(!working) {
 		cmdline_parser_free(&args_info);
@@ -1055,6 +1120,52 @@ int main(int argc, char *argv[])
 
 	JANUS_LOG(LOG_INFO, "Bye!\n");
 	return 0;
+}
+
+/* Convert the headers to a string */
+static int janus_pp_rtp_header_extension_stringify(char *buf, int len, char *out, int olen) {
+	if(!buf || len < 12)
+		return -1;
+	janus_pp_rtp_header *rtp = (janus_pp_rtp_header *)buf;
+	int hlen = 12;
+	int ooff = 0;
+	if(rtp->csrccount)	/* Skip CSRC if needed */
+		hlen += rtp->csrccount*4;
+	if(rtp->extension) {
+		janus_pp_rtp_header_extension *ext = (janus_pp_rtp_header_extension *)(buf+hlen);
+		int extlen = ntohs(ext->length)*4;
+		hlen += 4;
+		if(len >= (hlen + extlen)) {
+			/* 1-Byte extension */
+			if(ntohs(ext->type) == 0xBEDE) {
+				const uint8_t padding = 0x00, reserved = 0xF;
+				uint8_t extid = 0, idlen;
+				int i = 0;
+				while(i < extlen) {
+					extid = buf[hlen+i] >> 4;
+					if(extid == reserved) {
+						break;
+					} else if(extid == padding) {
+						i++;
+						continue;
+					}
+					if((ooff+16) > olen) {
+						break;
+					}
+					idlen = (buf[hlen+i] & 0xF)+1;
+					if(1 == idlen)
+						sprintf(&out[ooff], ",\"%u\":%u", (unsigned)extid, (unsigned)buf[hlen+i+1]);
+					else if(2 == idlen)
+						sprintf(&out[ooff], ",\"%u\":%u", (unsigned)extid, (unsigned)ntohl(*(uint32_t *)(buf+hlen+i)));
+					else if(4 == idlen)
+						sprintf(&out[ooff], ",\"%u\":%u", (unsigned)extid, (unsigned)*(uint32_t*)&buf[hlen+i]);
+					i += 1 + idlen;
+				}
+			}
+			hlen += extlen;
+		}
+	}
+	return -1;
 }
 
 /* Static helper to quickly find the extension data */
