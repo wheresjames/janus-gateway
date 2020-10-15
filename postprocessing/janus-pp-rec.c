@@ -71,7 +71,7 @@ Usage: janus-pp-rec [OPTIONS] source.mjr [destination.[opus|wav|webm|mp4|srt]]
                                   format from the destination)  (possible
                                   values="opus", "wav", "webm", "mp4",
                                   "srt")
-  -e, --extfile                 Dump RTP extensions with pts timestamps 
+  -e, --extfile                 Dump RTP extensions with pts timestamps
                                   into a JSON file.
 \endverbatim
  *
@@ -746,8 +746,8 @@ int main(int argc, char *argv[])
 			// size_t blen = strlen(extbuf);
 			// /* Save only if changed */
 			// if (memcmp(extbuf, prevextbuf, blen)) {
-            if (lastrotation != rotation) {
-                lastrotation = rotation;
+			if (0 <= rotation && lastrotation != rotation) {
+				lastrotation = rotation;
 				save2ext = 1;
 				//memcpy(prevextbuf, extbuf, blen);
 				fwrite(",{", 1, 2, extfileptr);
@@ -1188,7 +1188,7 @@ static int janus_pp_rtp_header_extension_find(char *buf, int len, int id,
 				uint8_t extid = 0, idlen;
 				int i = 0;
 				while(i < extlen) {
-					extid = buf[hlen+i] >> 4;
+					extid = 0x0f & (buf[hlen+i] >> 4);
 					if(extid == reserved) {
 						break;
 					} else if(extid == padding) {
